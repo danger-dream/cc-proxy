@@ -77,6 +77,20 @@ UPSTREAM_TIMEOUT = httpx.Timeout(connect=15.0, read=330.0, write=30.0, pool=15.0
 CLI_USER_AGENT = f"claude-cli/{CC_VERSION} ({USER_TYPE}, {CC_ENTRYPOINT})"
 
 
+def _normalize_cch_mode(value):
+    mode = str(value or "dynamic").strip().lower()
+    if mode in ("dynamic", "static", "disabled"):
+        return mode
+    return "dynamic"
+
+
+def _normalize_cch_value(value):
+    raw = "".join(ch for ch in str(value or "00000").strip().lower() if ch in "0123456789abcdef")
+    if not raw:
+        return "00000"
+    return raw[:5].rjust(5, "0")
+
+
 # ─── 持久 device_id ───
 
 def _load_or_create_device_id():
@@ -335,11 +349,21 @@ def compute_fingerprint(messages):
 def build_system_blocks(messages):
     fp = compute_fingerprint(messages)
     version = f"{CC_VERSION}.{fp}"
-    attribution = f"x-anthropic-billing-header: cc_version={version}; cc_entrypoint={CC_ENTRYPOINT}; cch=00000;"
-    return [
-        {"type": "text", "text": attribution},
-        {"type": "text", "text": "You are Claude Code, Anthropic's official CLI for Claude.", "cache_control": {"type": "ephemeral", "ttl": "1h"}},
-    ]
+    cfg = load_config()
+    cch_mode = _normalize_cch_mode(cfg.get("cch_mode", "dynamic"))
+    blocks = []
+    if cch_mode != "disabled":
+        parts = [f"cc_version={version}", f"cc_entrypoint={CC_ENTRYPOINT}"]
+        if cch_mode == "dynamic":
+            parts.append("cch=00000")
+        elif cch_mode == "static":
+            parts.append(f"cch={_normalize_cch_value(cfg.get('cch_static_value', '00000'))}")
+        attribution = "x-anthropic-billing-header: " + "; ".join(parts) + ";"
+        blocks.append({"type": "text", "text": attribution})
+    blocks.append(
+        {"type": "text", "text": "You are Claude Code, Anthropic's official CLI for Claude.", "cache_control": {"type": "ephemeral", "ttl": "1h"}}
+    )
+    return blocks
 
 
 def inject_user_system_to_messages(messages, user_system):
@@ -422,6 +446,16 @@ def _strip_message_cache_control(messages):
     return result
 
 
+def _strip_tool_cache_control(tools):
+    """移除客户端在 tools 上设置的 cache_control，由代理统一管理。"""
+    result = []
+    for tool in tools:
+        if isinstance(tool, dict) and "cache_control" in tool:
+            tool = {k: v for k, v in tool.items() if k != "cache_control"}
+        result.append(tool)
+    return result
+
+
 def add_cache_breakpoints(messages):
     """注入缓存断点。断点位置：倒数第二个 user turn + 最后一条消息。
     加上 system + tools 共 4 个断点（上限）。
@@ -485,11 +519,7 @@ def transform_request(body):
     messages = _strip_message_cache_control(messages)
     messages = add_cache_breakpoints(messages)
     system_blocks = build_system_blocks(messages)
-
     model = body.get("model", "claude-sonnet-4-20250514")
-    ml = model.lower()
-    supports_adaptive = "opus-4-6" in ml or "opus-4-7" in ml
-    supports_thinking = "haiku" not in ml and not supports_adaptive
 
     payload = {
         "model": model,
@@ -501,16 +531,14 @@ def transform_request(body):
         "temperature": 1,
     }
 
-    if supports_adaptive:
-        payload["thinking"] = {"type": "adaptive"}
-    elif supports_thinking:
-        max_out = body.get("max_tokens", 128000)
-        budget = min(max_out - 1, 10000)
-        if budget >= 1024:
-            payload["thinking"] = {"type": "enabled", "budget_tokens": budget}
+    if "temperature" in body:
+        payload["temperature"] = body["temperature"]
+
+    if "thinking" in body:
+        payload["thinking"] = body["thinking"]
 
     if body.get("tools"):
-        tools = [dict(t) for t in body["tools"]]
+        tools = _strip_tool_cache_control([dict(t) for t in body["tools"]])
         for t in tools:
             t["name"] = _sanitize_tool_name(t["name"])
         tools[-1] = dict(tools[-1])
@@ -524,10 +552,13 @@ def transform_request(body):
             tc["name"] = _sanitize_tool_name(tc["name"])
         payload["tool_choice"] = tc
 
-    if supports_adaptive or supports_thinking:
+    if "context_management" in body:
+        payload["context_management"] = body["context_management"]
+    elif "thinking" in body:
         payload["context_management"] = {"edits": [{"type": "clear_thinking_20251015", "keep": "all"}]}
-    if supports_adaptive:
-        payload["output_config"] = {"effort": "high"}
+
+    if "output_config" in body:
+        payload["output_config"] = body["output_config"]
 
     return payload
 
@@ -540,6 +571,11 @@ CCH_PLACEHOLDER = b"cch=00000"
 
 def sign_body(payload_dict):
     body_bytes = json.dumps(payload_dict, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    cfg = load_config()
+    if _normalize_cch_mode(cfg.get("cch_mode", "dynamic")) != "dynamic":
+        return body_bytes
+    if CCH_PLACEHOLDER not in body_bytes:
+        return body_bytes
     h = xxhash.xxh64(body_bytes, seed=CCH_SEED).intdigest()
     cch = f"{h & 0xFFFFF:05x}"
     return body_bytes.replace(CCH_PLACEHOLDER, f"cch={cch}".encode("ascii"), 1)

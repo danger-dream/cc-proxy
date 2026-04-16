@@ -8,7 +8,7 @@ Claude Code 伪装反向代理。接收标准 Anthropic `/v1/messages` 请求，
 - **OAuth 登录** — 通过 Telegram Bot 一键 OAuth 登录 Anthropic 账号，自动获取 Token，无需手动填写
 - **OAuth Token 管理** — Token 过期前自动刷新，也可通过 Bot 手动刷新或重新登录
 - **多 API Key** — 支持多个自定义 API Key，通过 `Authorization: Bearer <key>` 或 `x-api-key` 鉴权
-- **智能 Thinking** — 根据模型自动选择 thinking 模式：Opus 用 adaptive，Sonnet 用 enabled（budget 10K），Haiku 不启用
+- **Thinking 透传** — 仅在客户端显式传入 `thinking` 时透传，避免代理强制开启导致缓存前缀失效
 - **缓存断点** — 自动在最后两条用户消息上注入 `cache_control`，最大化 Prompt Caching 命中率
 - **SSE 流式透传** — 完整转发上游 SSE 流，实时记录 Token 用量和耗时
 - **SQLite 日志** — 每条请求记录状态、耗时、Token 用量、完整请求/响应体
@@ -49,6 +49,8 @@ pip install requests xxhash
   "oauth_file": "oauth.json",
   "telegram_bot_token": "",
   "telegram_admin_ids": [],
+  "cch_mode": "disabled",
+  "cch_static_value": "00000",
   "db_path": "cc-proxy.db",
   "log_dir": "logs"
 }
@@ -62,6 +64,8 @@ pip install requests xxhash
 | `oauth_file` | OAuth Token 文件路径（相对于项目目录） |
 | `telegram_bot_token` | Telegram Bot Token，留空则不启用 Bot |
 | `telegram_admin_ids` | 允许使用 Bot 的 Telegram 用户 ID 列表，空数组表示不限制 |
+| `cch_mode` | `dynamic` / `static` / `disabled`。`dynamic` 每请求重签，最像 CLI；`static` 用固定值，通常更利于缓存命中；`disabled` 完全不注入 `x-anthropic-billing-header` |
+| `cch_static_value` | 当 `cch_mode=static` 时使用的 5 位十六进制值，默认 `00000` |
 | `db_path` | SQLite 数据库路径 |
 | `log_dir` | 日志目录（预留字段） |
 
@@ -173,12 +177,12 @@ CC Proxy 模拟 Claude Code CLI 客户端的完整特征：
 | **User-Agent** | `claude-cli/{version} (external, cli)` |
 | **Beta Features** | 7 个 Claude Code 专属 beta flag |
 | **Fingerprint** | 基于首条用户消息 + 盐值 + 版本号的 SHA256 前 3 位 |
-| **CCH 签名** | xxHash64 全 body 签名，嵌入 billing header |
+| **CCH 签名** | 支持 `dynamic` / `static` / `disabled` 三种模式；默认 `disabled`，会完全移除 `x-anthropic-billing-header` |
 | **System Prompt** | 注入 billing attribution + Claude Code 身份声明 |
 | **Metadata** | 包含 device_id 和 account_uuid |
-| **Thinking** | Opus: adaptive / Sonnet: enabled (10K budget) / Haiku: 关闭 |
+| **Thinking** | 仅透传客户端显式提供的 `thinking` 参数 |
 | **缓存断点** | 最后两条 user 消息 + tools 末尾 + system 末尾 |
-| **Context Management** | `clear_thinking_20251015` + `keep: all` |
+| **Context Management** | 仅在请求显式带 `thinking` 且未提供 `context_management` 时自动补充 |
 
 ### 请求转换流程
 
@@ -193,7 +197,7 @@ API Key 验证
   ↓
 添加缓存断点 (最后两条 user message + tools 末尾)
   ↓
-设置 thinking 模式 (根据模型)
+仅在客户端显式传入时透传 thinking
   ↓
 工具名重写 (sessions_ → sessions_, session_ → cc_ses_)
   ↓
@@ -232,6 +236,7 @@ cc-proxy/
 - `api_keys` 为空时所有请求都会被拒绝，至少需要添加一个
 - 数据库文件 `cc-proxy.db` 运行后自动创建，使用 WAL 模式
 - `telegram_admin_ids` 为空数组时任何人都可以使用 Bot，生产环境建议填写管理员 ID
+- 当前默认 `cch_mode` 为 `disabled` 以优先保证缓存命中；若需要更强的 CLI 伪装，可改为 `static` 或 `dynamic`
 - 默认伪装版本为 Claude CLI v2.1.92，如需更新请修改 `server.py` 中的 `CC_VERSION` 和 `BETAS`
 
 ## License

@@ -239,6 +239,8 @@ def stats_summary(since_ts):
              AVG(CASE WHEN status='success' THEN connect_time_ms END) as avg_connect_ms,
              AVG(CASE WHEN status='success' AND is_stream=1 THEN first_token_time_ms END) as avg_first_token_ms,
              AVG(CASE WHEN status='success' THEN total_time_ms END) as avg_total_ms,
+             SUM(CASE WHEN status='success' AND cache_read_tokens > 0 THEN 1 ELSE 0 END) as success_with_cache_hit,
+             SUM(CASE WHEN status='success' AND cache_creation_tokens > 0 THEN 1 ELSE 0 END) as success_with_cache_write,
              SUM(input_tokens) as total_input_tokens,
              SUM(output_tokens) as total_output_tokens,
              SUM(cache_creation_tokens) as total_cache_creation,
@@ -265,3 +267,63 @@ def stats_summary(since_ts):
     ).fetchall()
 
     return row, recent_errors, recent_calls
+
+
+def cache_stats_by_model(since_ts, limit=3):
+    conn = _get_conn()
+    return conn.execute(
+        """SELECT
+             COALESCE(model, '?') as model,
+             COUNT(*) as total_requests,
+             SUM(CASE WHEN status='success' THEN 1 ELSE 0 END) as success_count,
+             SUM(CASE WHEN status='success' AND cache_read_tokens > 0 THEN 1 ELSE 0 END) as hit_requests,
+             SUM(CASE WHEN status='success' AND cache_creation_tokens > 0 THEN 1 ELSE 0 END) as write_requests,
+             SUM(input_tokens + cache_creation_tokens + cache_read_tokens) as total_prompt_tokens,
+             SUM(cache_creation_tokens) as total_cache_creation,
+             SUM(cache_read_tokens) as total_cache_read
+           FROM request_log
+           WHERE created_at >= ?
+           GROUP BY COALESCE(model, '?')
+           ORDER BY total_prompt_tokens DESC, total_requests DESC
+           LIMIT ?""",
+        (since_ts, limit),
+    ).fetchall()
+
+
+def cache_stats_by_apikey(since_ts, limit=3):
+    conn = _get_conn()
+    return conn.execute(
+        """SELECT
+             COALESCE(api_key_name, '?') as api_key_name,
+             COUNT(*) as total_requests,
+             SUM(CASE WHEN status='success' THEN 1 ELSE 0 END) as success_count,
+             SUM(CASE WHEN status='success' AND cache_read_tokens > 0 THEN 1 ELSE 0 END) as hit_requests,
+             SUM(CASE WHEN status='success' AND cache_creation_tokens > 0 THEN 1 ELSE 0 END) as write_requests,
+             SUM(input_tokens + cache_creation_tokens + cache_read_tokens) as total_prompt_tokens,
+             SUM(cache_creation_tokens) as total_cache_creation,
+             SUM(cache_read_tokens) as total_cache_read
+           FROM request_log
+           WHERE created_at >= ?
+           GROUP BY COALESCE(api_key_name, '?')
+           ORDER BY total_prompt_tokens DESC, total_requests DESC
+           LIMIT ?""",
+        (since_ts, limit),
+    ).fetchall()
+
+
+def recent_cache_misses(since_ts, limit=3):
+    conn = _get_conn()
+    return conn.execute(
+        """SELECT
+             request_id, created_at, api_key_name, model, is_stream,
+             msg_count, tool_count, input_tokens, output_tokens,
+             cache_creation_tokens, cache_read_tokens, connect_time_ms,
+             first_token_time_ms, total_time_ms, retry_count
+           FROM request_log
+           WHERE created_at >= ?
+             AND status='success'
+             AND cache_read_tokens=0
+           ORDER BY created_at DESC
+           LIMIT ?""",
+        (since_ts, limit),
+    ).fetchall()

@@ -530,25 +530,37 @@ def _handle_stats(chat_id, msg_id, cb_id, period):
         label = f"最近 {period} 天"
 
     row, _errors, recent_calls = db.stats_summary(since)
+    model_rows = db.cache_stats_by_model(since, limit=3)
+    apikey_rows = db.cache_stats_by_apikey(since, limit=3)
+    miss_rows = db.recent_cache_misses(since, limit=3)
     total = row["total"] or 0
     text = f"<b>📊 统计 — {label}</b>\n\n"
     raw_inp = (row['total_input_tokens'] or 0)
     raw_out = (row['total_output_tokens'] or 0)
     raw_cr = (row['total_cache_read'] or 0)
+    raw_cc = (row['total_cache_creation'] or 0)
     total_retries = row['total_retries'] or 0
     retried_requests = row['retried_requests'] or 0
-    total_inp = raw_inp + (row['total_cache_creation'] or 0) + raw_cr
+    total_inp = raw_inp + raw_cc + raw_cr
     cache_hit_rate = (raw_cr / total_inp * 100) if total_inp > 0 else 0
+    cache_write_rate = (raw_cc / total_inp * 100) if total_inp > 0 else 0
     success_count = row['success_count'] or 0
     error_count = row['error_count'] or 0
     pending_count = row['pending_count'] or 0
     success_rate = (success_count / total * 100) if total > 0 else 0
+    success_with_cache_hit = row['success_with_cache_hit'] or 0
+    success_with_cache_write = row['success_with_cache_write'] or 0
+    request_hit_rate = (success_with_cache_hit / success_count * 100) if success_count > 0 else 0
+    request_write_rate = (success_with_cache_write / success_count * 100) if success_count > 0 else 0
 
     text += "Tokens:\n"
     text += f"↑ {_fmt_tokens(total_inp)} | ↓ {_fmt_tokens(raw_out)} | cache {_fmt_tokens(raw_cr)} ({cache_hit_rate:.1f}%)\n\n"
     text += "请求:\n"
     text += f"共 {total} 次 | ✅ {success_count} | ❌ {error_count} | ⏳ {pending_count}\n"
     text += f"成功率 {success_rate:.1f}%\n\n"
+    text += "缓存:\n"
+    text += f"命中请求 {success_with_cache_hit}/{success_count} ({request_hit_rate:.1f}%) | 写入请求 {success_with_cache_write}/{success_count} ({request_write_rate:.1f}%)\n"
+    text += f"读缓存 {_fmt_tokens(raw_cr)} ({cache_hit_rate:.1f}%) | 写缓存 {_fmt_tokens(raw_cc)} ({cache_write_rate:.1f}%)\n\n"
     text += "耗时（平均）:\n"
     conn_avg = f"{row['avg_connect_ms']:.0f}ms" if row["avg_connect_ms"] is not None else "-"
     first_avg = f"{row['avg_first_token_ms']:.0f}ms" if row["avg_first_token_ms"] is not None else "-"
@@ -557,6 +569,48 @@ def _handle_stats(chat_id, msg_id, cb_id, period):
     if total > 0:
         text += "\n重试:\n"
         text += f"共 {total_retries} 次 | 命中 {retried_requests} 个请求 ({retried_requests / total * 100:.1f}%)\n"
+
+    if model_rows:
+        text += "\n<b>按模型:</b>\n"
+        for r in model_rows:
+            success = r["success_count"] or 0
+            hit = r["hit_requests"] or 0
+            write = r["write_requests"] or 0
+            hit_rate = (hit / success * 100) if success > 0 else 0
+            write_rate = (write / success * 100) if success > 0 else 0
+            model = _escape_html((r["model"] or "?")[:36])
+            text += (
+                f"\n<code>{model}</code>\n"
+                f"  命中 {hit}/{success} ({hit_rate:.1f}%) | 写入 {write}/{success} ({write_rate:.1f}%)\n"
+                f"  读 {_fmt_tokens(r['total_cache_read'] or 0)} | 写 {_fmt_tokens(r['total_cache_creation'] or 0)} | 总 {_fmt_tokens(r['total_prompt_tokens'] or 0)}\n"
+            )
+
+    if apikey_rows:
+        text += "\n<b>按 Key:</b>\n"
+        for r in apikey_rows:
+            success = r["success_count"] or 0
+            hit = r["hit_requests"] or 0
+            write = r["write_requests"] or 0
+            hit_rate = (hit / success * 100) if success > 0 else 0
+            write_rate = (write / success * 100) if success > 0 else 0
+            key_name = _escape_html((r["api_key_name"] or "?")[:24])
+            text += (
+                f"\n<code>{key_name}</code>\n"
+                f"  命中 {hit}/{success} ({hit_rate:.1f}%) | 写入 {write}/{success} ({write_rate:.1f}%)\n"
+                f"  读 {_fmt_tokens(r['total_cache_read'] or 0)} | 写 {_fmt_tokens(r['total_cache_creation'] or 0)} | 总 {_fmt_tokens(r['total_prompt_tokens'] or 0)}\n"
+            )
+
+    if miss_rows:
+        text += "\n<b>最近未命中样本:</b>\n"
+        for r in miss_rows:
+            ts = datetime.fromtimestamp(r["created_at"], tz=_BJT).strftime("%m-%d %H:%M:%S")
+            model = _escape_html((r["model"] or "?")[:28])
+            key_name = _escape_html((r["api_key_name"] or "?")[:18])
+            inp = (r["input_tokens"] or 0) + (r["cache_creation_tokens"] or 0) + (r["cache_read_tokens"] or 0)
+            text += (
+                f"\n<code>[{ts}]</code> {model} / {key_name}\n"
+                f"  ↑{_fmt_tokens(inp)} | 写 {_fmt_tokens(r['cache_creation_tokens'] or 0)} | msgs {r['msg_count'] or 0} | tools {r['tool_count'] or 0}\n"
+            )
 
     if recent_calls:
         text += "\n<b>最近调用:</b>\n"

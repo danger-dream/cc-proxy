@@ -7,6 +7,8 @@
   "oauth_file": "oauth.json",
   "telegram_bot_token": "",
   "telegram_admin_ids": [],
+  "cch_mode": "disabled",
+  "cch_static_value": "00000",
   "db_path": "cc-proxy.db",
   "log_dir": "logs"
 }
