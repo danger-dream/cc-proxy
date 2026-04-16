@@ -70,6 +70,7 @@ BETAS = [
     "effort-2025-11-24",
     "redact-thinking-2026-02-12",
     "context-management-2025-06-27",
+    "extended-cache-ttl-2025-04-11",
 ]
 
 UPSTREAM_TIMEOUT = httpx.Timeout(connect=15.0, read=330.0, write=30.0, pool=15.0)
@@ -337,7 +338,7 @@ def build_system_blocks(messages):
     attribution = f"x-anthropic-billing-header: cc_version={version}; cc_entrypoint={CC_ENTRYPOINT}; cch=00000;"
     return [
         {"type": "text", "text": attribution},
-        {"type": "text", "text": "You are Claude Code, Anthropic's official CLI for Claude.", "cache_control": {"type": "ephemeral"}},
+        {"type": "text", "text": "You are Claude Code, Anthropic's official CLI for Claude.", "cache_control": {"type": "ephemeral", "ttl": "1h"}},
     ]
 
 
@@ -375,11 +376,11 @@ def _inject_cache_on_msg(msg):
     if isinstance(content, list) and content:
         content = list(content)
         last_block = dict(content[-1])
-        last_block["cache_control"] = {"type": "ephemeral"}
+        last_block["cache_control"] = {"type": "ephemeral", "ttl": "1h"}
         content[-1] = last_block
         msg["content"] = content
     elif isinstance(content, str):
-        msg["content"] = [{"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}]
+        msg["content"] = [{"type": "text", "text": content, "cache_control": {"type": "ephemeral", "ttl": "1h"}}]
     return msg
 
 
@@ -487,7 +488,7 @@ def transform_request(body):
 
     model = body.get("model", "claude-sonnet-4-20250514")
     ml = model.lower()
-    supports_adaptive = "opus-4-6" in ml
+    supports_adaptive = "opus-4-6" in ml or "opus-4-7" in ml
     supports_thinking = "haiku" not in ml and not supports_adaptive
 
     payload = {
@@ -513,7 +514,7 @@ def transform_request(body):
         for t in tools:
             t["name"] = _sanitize_tool_name(t["name"])
         tools[-1] = dict(tools[-1])
-        tools[-1]["cache_control"] = {"type": "ephemeral"}
+        tools[-1]["cache_control"] = {"type": "ephemeral", "ttl": "1h"}
         payload["tools"] = tools
 
     if "tool_choice" in body:
