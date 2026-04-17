@@ -10,6 +10,7 @@ import uuid
 import os
 import time
 import asyncio
+import random
 import threading
 from datetime import datetime, timezone, timedelta
 from contextlib import asynccontextmanager
@@ -494,17 +495,52 @@ def build_metadata():
 
 # ─── 工具名重写 ───
 
-TOOL_NAME_REWRITES = {"sessions_": "cc_sess_", "session_": "cc_ses_"}
+TOOL_NAME_REWRITES = {"sessions_": "cc_sess_", "session_": "cc_ses_"}  # 静态前缀映射（保留兼容）
+
+# 生成混淆用的可读假名前缀
+_FAKE_PREFIXES = [
+    "analyze_", "compute_", "fetch_", "generate_", "lookup_", "modify_",
+    "process_", "query_", "render_", "resolve_", "sync_", "update_",
+    "validate_", "convert_", "extract_", "manage_", "monitor_", "parse_",
+    "review_", "search_", "transform_", "handle_", "invoke_", "notify_",
+]
 
 
-def _sanitize_tool_name(name):
+def _build_dynamic_tool_map(tool_names, threshold=5):
+    """当 tools 数量超过 threshold 时，生成原名→假名的动态映射。
+    返回 dict 或 None（无需映射时）。
+    """
+    if len(tool_names) <= threshold:
+        return None
+    mapping = {}
+    available = list(_FAKE_PREFIXES)
+    rng = random.Random(hash(tuple(tool_names)))  # 同进程内同一组 tools 映射稳定，保证缓存命中
+    rng.shuffle(available)
+    for i, name in enumerate(tool_names):
+        prefix = available[i % len(available)]
+        fake = f"{prefix}{name[:3]}{i:02d}"
+        mapping[name] = fake
+    return mapping
+
+
+def _sanitize_tool_name(name, dynamic_map=None):
+    # 先尝试动态映射
+    if dynamic_map and name in dynamic_map:
+        return dynamic_map[name]
+    # 兜底：静态前缀映射
     for prefix, replacement in TOOL_NAME_REWRITES.items():
         if name.startswith(prefix):
             return replacement + name[len(prefix):]
     return name
 
 
-def _restore_tool_names_in_chunk(chunk_bytes):
+def _restore_tool_names_in_chunk(chunk_bytes, dynamic_map=None):
+    # 动态映射还原（假名→原名），长的先替换避免子串冲突
+    if dynamic_map:
+        sorted_items = sorted(dynamic_map.items(), key=lambda x: len(x[1]), reverse=True)
+        for original, fake in sorted_items:
+            chunk_bytes = chunk_bytes.replace(fake.encode(), original.encode())
+    # 静态映射还原
     for prefix, replacement in TOOL_NAME_REWRITES.items():
         chunk_bytes = chunk_bytes.replace(replacement.encode(), prefix.encode())
     return chunk_bytes
@@ -537,10 +573,18 @@ def transform_request(body):
     if "thinking" in body:
         payload["thinking"] = body["thinking"]
 
+    # 动态工具名映射（tools > 5 时触发）
+    dynamic_tool_map = None
+    if body.get("tools"):
+        tool_names = [t.get("name", "") for t in body["tools"]]
+        dynamic_tool_map = _build_dynamic_tool_map(tool_names)
+        if dynamic_tool_map:
+            print(f"  [tool] dynamic mapping {len(dynamic_tool_map)} tools")
+
     if body.get("tools"):
         tools = _strip_tool_cache_control([dict(t) for t in body["tools"]])
         for t in tools:
-            t["name"] = _sanitize_tool_name(t["name"])
+            t["name"] = _sanitize_tool_name(t["name"], dynamic_tool_map)
         tools[-1] = dict(tools[-1])
         tools[-1]["cache_control"] = {"type": "ephemeral", "ttl": "1h"}
         payload["tools"] = tools
@@ -549,7 +593,7 @@ def transform_request(body):
         tc = body["tool_choice"]
         if isinstance(tc, dict) and "name" in tc:
             tc = dict(tc)
-            tc["name"] = _sanitize_tool_name(tc["name"])
+            tc["name"] = _sanitize_tool_name(tc["name"], dynamic_tool_map)
         payload["tool_choice"] = tc
 
     if "context_management" in body:
@@ -560,7 +604,7 @@ def transform_request(body):
     if "output_config" in body:
         payload["output_config"] = body["output_config"]
 
-    return payload
+    return payload, dynamic_tool_map
 
 
 # ─── CCH 签名 ───
@@ -793,7 +837,7 @@ async def proxy_messages(request: Request):
 
     # 转换请求
     try:
-        payload = transform_request(body)
+        payload, dynamic_tool_map = transform_request(body)
     except Exception as e:
         import traceback; traceback.print_exc()
         await asyncio.to_thread(
@@ -872,7 +916,7 @@ async def proxy_messages(request: Request):
                         err_body,
                         retry_count=retry_count,
                     )
-                    restored = _restore_tool_names_in_chunk(err_body.encode())
+                    restored = _restore_tool_names_in_chunk(err_body.encode(), dynamic_tool_map)
                     resp_headers = {}
                     for h in ("content-type", "x-request-id", "request-id"):
                         if h in upstream_resp.headers:
@@ -915,7 +959,7 @@ async def proxy_messages(request: Request):
                             "Upstream returned an empty response before any content was available.",
                         )
 
-                    restored = _restore_tool_names_in_chunk(raw_resp)
+                    restored = _restore_tool_names_in_chunk(raw_resp, dynamic_tool_map)
                     total_ms = int((time.time() - t_start) * 1000)
                     try:
                         response_obj = json.loads(restored)
@@ -965,7 +1009,7 @@ async def proxy_messages(request: Request):
                     while True:
                         chunk = await anext(stream_iter)
                         if chunk:
-                            first_chunk = _restore_tool_names_in_chunk(chunk)
+                            first_chunk = _restore_tool_names_in_chunk(chunk, dynamic_tool_map)
                             break
                 except StopAsyncIteration:
                     upstream_stream_empty = True
@@ -1050,7 +1094,7 @@ async def proxy_messages(request: Request):
                         if not upstream_stream_empty:
                             async for chunk in stream_iter:
                                 if chunk:
-                                    restored = _restore_tool_names_in_chunk(chunk)
+                                    restored = _restore_tool_names_in_chunk(chunk, dynamic_tool_map)
                                     tracker.feed(restored)
                                     yield restored
                         completed = True
