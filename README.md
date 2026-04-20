@@ -1,6 +1,31 @@
-# CC Proxy
+# CC Proxy【已弃用】
 
 Claude Code 伪装反向代理。接收标准 Anthropic `/v1/messages` 请求，自动注入 Claude Code 指纹后转发至 Anthropic API，让普通 API 调用享受 Claude Code 同等待遇。
+
+> ⚠️ **This repository has been archived and is no longer maintained.**
+>
+> `cc-proxy` 已停止开发与维护，后续所有新功能、Bug 修复和安全更新都将在接替项目 **Parrot** 中进行。
+>
+> Parrot 是 cc-proxy 的精神续作，在其基础上演进为**双家族（Anthropic + OpenAI）代理**，覆盖更完整的 OAuth 账号池、渠道管理、统计面板与运维能力。
+>
+> 👉 **新项目地址**：[danger-dream/Parrot](https://github.com/danger-dream/Parrot)
+> 🐳 **容器镜像**：`ghcr.io/danger-dream/parrot:latest`
+>
+> ---
+>
+> ### 为什么归档？
+>
+> - Parrot 已完全覆盖 cc-proxy 的全部能力，并扩展支持 OpenAI / Codex OAuth 渠道
+> - 两者共用同一批 Anthropic OAuth 账号时会产生双重刷新冲突，不宜长期并存
+> - 继续维护两套代码对用户和开发者都是负担
+>
+> ### 迁移建议
+>
+> 直接部署 Parrot 即可，配置结构、API 入口（`/v1/messages`）与 cc-proxy 完全兼容，迁移成本几乎为零。部署说明见 Parrot 仓库的 `README.md` 与 `deploy.sh`。
+>
+> 本仓库保留作为历史存档，Issue 与 PR 将不再被处理。感谢所有曾经使用和贡献过 cc-proxy 的朋友 🙏
+
+------
 
 ## 特性
 
