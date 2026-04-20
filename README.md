@@ -1,4 +1,4 @@
-# CC Proxy【已弃用】
+# CC Proxy
 
 Claude Code 伪装反向代理。接收标准 Anthropic `/v1/messages` 请求，自动注入 Claude Code 指纹后转发至 Anthropic API，让普通 API 调用享受 Claude Code 同等待遇。
 
